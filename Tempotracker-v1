@@ -1,0 +1,102 @@
+# file: TempoTracker.py
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+
+# --- USER CONFIG ---
+CSV_FILE = "INSERT_YOUR_EXERSIZE_HERE.csv"   # <--- change this only once
+EXERCISE = "squat"  # options: "squat", "pushup", "bicep_curl"
+
+
+# Load CSV
+df = pd.read_csv(CSV_FILE)
+
+t = df["seconds_elapsed"].values
+z = df["z"].values
+
+# --- Smooth signal ---
+window = 9 if "squat" in EXERCISE.lower() else 5
+z_smooth = pd.Series(z).rolling(window=window, center=True).mean()
+z_smooth = z_smooth.bfill().ffill().values
+
+# --- Rep detection parameters ---
+rep_presets = {
+    "squat": {"prom_peaks": 2.0, "prom_valleys": 1.5, "distance": 40},
+    "pushup": {"prom_peaks": 1.5, "prom_valleys": 1.5, "distance": 20},
+    "bicep_curl": {"prom_peaks": 1.7, "prom_valleys": 1.7, "distance": 20},
+}
+
+params = rep_presets[EXERCISE]
+
+# --- Find peaks & valleys ---
+peaks, _ = find_peaks(z_smooth, prominence=params["prom_peaks"], distance=params["distance"])
+valleys, _ = find_peaks(-z_smooth, prominence=params["prom_valleys"], distance=params["distance"])
+
+# --- Pair into valid reps ---
+valid_reps = []
+if EXERCISE in ["pushup", "bicep_curl"]:  # Valley → Peak → Valley
+    for p in peaks:
+        before = valleys[valleys < p]
+        after = valleys[valleys > p]
+        if before.size and after.size:
+            v_before = before[-1]
+            v_after = after[0]
+            valid_reps.append((v_before, p, v_after))
+elif EXERCISE == "squat":  # Peak → Valley → Peak
+    for v in valleys:
+        before = peaks[peaks < v]
+        after = peaks[peaks > v]
+        if before.size and after.size:
+            p_before = before[-1]
+            p_after = after[0]
+            valid_reps.append((p_before, v, p_after))
+
+rep_count = len(valid_reps)
+
+# --- Phase durations ---
+phase_durations = []
+for start, mid, end in valid_reps:
+    if EXERCISE == "squat":
+        eccentric = t[mid] - t[start]    # down
+        concentric = t[end] - t[mid]    # up
+        iso_bottom = 0.0
+        iso_top = 0.0
+    else:  # pushup/curl
+        concentric = t[mid] - t[start]  # up
+        eccentric = t[end] - t[mid]     # down
+        iso_bottom = 0.0
+        iso_top = 0.0
+
+    phase_durations.append({
+        "eccentric": eccentric,
+        "concentric": concentric,
+        "iso_bottom": iso_bottom,
+        "iso_top": iso_top,
+        "total": t[end] - t[start],
+    })
+
+# --- Print results ---
+print(f"Detected {rep_count} {EXERCISE} reps")
+for i, phases in enumerate(phase_durations, 1):
+    print(f"Rep {i}: "
+          f"Ecc {phases['eccentric']:.2f}s, "
+          f"Con {phases['concentric']:.2f}s, "
+          f"IsoBottom {phases['iso_bottom']:.2f}s, "
+          f"IsoTop {phases['iso_top']:.2f}s, "
+          f"Total {phases['total']:.2f}s")
+
+# --- Plot ---
+plt.plot(t, z_smooth, color="black", label="Z-axis (smoothed)")
+plt.plot(t[peaks], z_smooth[peaks], "bo", label="All peaks")
+plt.plot(t[valleys], z_smooth[valleys], "go", label="All valleys")
+
+for (start, mid, end), phases in zip(valid_reps, phase_durations):
+    plt.axvspan(t[start], t[mid], color="red", alpha=0.2, label="Eccentric" if start == valid_reps[0][0] else "")
+    plt.axvspan(t[mid], t[end], color="blue", alpha=0.2, label="Concentric" if start == valid_reps[0][0] else "")
+    plt.plot(t[start], z_smooth[start], "o", color="limegreen")
+    plt.plot(t[mid], z_smooth[mid], "o", color="deepskyblue")
+    plt.plot(t[end], z_smooth[end], "o", color="limegreen")
+
+plt.legend()
+plt.title(f"{EXERCISE.capitalize()} reps: {rep_count}")
+plt.show()
